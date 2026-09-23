@@ -11,7 +11,7 @@ QUESTIONS = {
     'jev': {  # TypeSafe's atomic questions: narrow and literal, each about a named part of the state
         'remarkable': {
             'type': 'boolean',
-            'instructions': f"Is there something specific in `focus` that a friend sitting beside {USER} would naturally blurt a comment about?",
+            'instructions': f"Is there something specific in `focus` or `media` that a friend sitting beside {USER} would naturally blurt a comment about?",
             'criteria': {
                 'true': 'It shows something specific and comment-worthy: a particular video, song, game, product, search query, error message, a funny or embarrassing title.',
                 'false': 'It is generic or routine: an empty desktop, a file manager, a new tab, an app name with no specific content.',
@@ -19,23 +19,23 @@ QUESTIONS = {
         },
         'busy': {
             'type': 'score',
-            'instructions': f'How much would an interruption cost {USER} right now, judging by `focus`?',
+            'instructions': f'How much would an interruption cost {USER} right now, judging by `focus` and by `mic` (the apps recording the microphone, if any)?',
             'criteria': [
                 'Idle or passive leisure: a desktop or launcher with nothing open, music playing, a video or stream, scrolling a feed.',
                 'Casual activity: browsing the web, shopping, chatting with friends, changing settings, managing files.',
                 'Focused work: writing or debugging code, writing a document, coursework, reading documentation or a paper, a spreadsheet.',
-                'Must not be interrupted: a call or meeting, a presentation or screen share, an exam or timed quiz, a competitive online match.',
+                'Must not be interrupted: a call or meeting (a chat app in `mic`), a presentation or screen share, an exam or timed quiz, a competitive online match.',
             ],
         },
     },
     'local': {  # each answer continues `prefill`; we compare the logits of the label words, low to high
         'remarkable': {
-            'ask': f'In one word, would a friend sitting beside {USER} find what is in `focus` worth a comment?',
+            'ask': f'In one word, would a friend sitting beside {USER} find what is in `focus` or `media` worth a comment?',
             'prefill': f"What is on {USER}'s screen is",
             'labels': [BORING, NOTABLE],
         },
         'busy': {
-            'ask': f'In one word, what is {USER} doing right now, judging by `focus`?',
+            'ask': f'In one word, what is {USER} doing right now, judging by `focus` and `mic` (the apps recording the microphone)?',
             'prefill': f'Right now {USER} is',
             'labels': [
                 [' idle', ' away', ' relaxing', ' watching', ' listening', ' resting'],
@@ -91,4 +91,7 @@ for line in kernel.stdout:
     del state['t']  # a clock reading says nothing to a model
     start = time.perf_counter()
     answers = ask(state, QUESTIONS[backend])
-    print(line.strip(), '\n   ', {name: show(v) for name, v in answers.items()}, f'{(time.perf_counter() - start) * 1000:.0f} ms', flush=True)
+    focus = state.get('focus', {})  # the line itself is a wall of text: print its outline
+    print(f"{focus.get('app')} | {focus.get('title', '')[:50]} | {len(focus.get('text', ''))} chars | idle {state['idle_s']} s"
+          + ''.join(f" | {key}: {json.dumps(state[key], ensure_ascii=False)}" for key in ('media', 'mic', 'headphones') if key in state),
+          '\n   ', {name: show(v) for name, v in answers.items()}, f'{(time.perf_counter() - start) * 1000:.0f} ms', flush=True)

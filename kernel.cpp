@@ -2,7 +2,9 @@
 //   {"t": s since start, "idle_s": s since the last key or mouse input, "focus": {"app", "title", "text"},
 //    "media": [{"app", "title", "artist"}], "mic": [app], "headphones": device name}
 // Past `idle_s`, a field is there only when it has something to say: nothing playing, no `media`; sound on speakers, no `headphones`.
-// usage: kernel [poll_seconds=10]
+// usage: kernel [poll_seconds=10] [own_pid]
+// `focus` is the last foreground window that isn't own_pid's: clicking the companion must not make us read the companion.
+// Any line on stdin asks for a read right now, e.g. the moment the user starts talking to her.
 #include <windows.h>
 #include <initguid.h> // these three in this order: initguid has the next two define their property keys here, not just declare them,
 #include <mmdeviceapi.h> // and this one brings the macro
@@ -16,9 +18,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <format>
+#include <iostream>
 #include <print>
 #include <set>
 #include <string>
+#include <thread>
 
 const size_t TEXT_CAP = 2000; // UTF-16 units of window text per line. ponytail: spent in document order; start from the focused element if what is on screen still overflows it
 
@@ -96,9 +100,19 @@ std::wstring app_name(DWORD pid) { // C:\...\chrome.exe -> chrome
     return std::filesystem::path(path).stem().wstring();
 }
 
+DWORD own = 0; // the companion's process: its windows are never what the user is doing
+HWND target = nullptr; // the last foreground window that isn't the companion's
+
+// Called on every foreground change, which is all the hook listens to.
+void CALLBACK foreground(HWINEVENTHOOK, DWORD, HWND w, LONG, LONG, DWORD, DWORD) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(w, &pid);
+    if (pid != own) target = w;
+}
+
 // ponytail: GetForegroundWindow says ApplicationFrameHost for UWP apps; take the pid from the UIA focused element instead
 std::string focus() {
-    HWND w = GetForegroundWindow();
+    HWND w = IsWindow(target) ? target : GetForegroundWindow(); // UIA reads a window in the background just as well
     wchar_t title[512]{};
     GetWindowTextW(w, title, 512);
     DWORD pid = 0;
@@ -187,6 +201,7 @@ int idle_s() {
 
 int main(int argc, char** argv) {
     int poll = argc > 1 ? atoi(argv[1]) : 10;
+    own = argc > 2 ? atoi(argv[2]) : 0;
     winrt::init_apartment();
     uia = winrt::create_instance<IUIAutomation>(CLSID_CUIAutomation);
     uia->CreateCacheRequest(cache.put());
@@ -196,10 +211,24 @@ int main(int argc, char** argv) {
     cache->put_TreeScope(TreeScope_Subtree);
     audio = winrt::create_instance<IMMDeviceEnumerator>(__uuidof(MMDeviceEnumerator));
     auto start = std::chrono::steady_clock::now();
-    for (;;) {
+    auto report = [&] {
         double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         std::println(R"({{"t":{:.1f},"idle_s":{}{}{}{}{}}})", t, idle_s(), focus(), media(), mic(), headphones());
         fflush(stdout); // println throws once the reader is gone, which ends us
-        Sleep(poll * 1000);
+    };
+
+    target = GetForegroundWindow();
+    SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, foreground, 0, 0, WINEVENT_OUTOFCONTEXT);
+    // stdin lines become thread messages, so reads, polls and the hook all run on this thread; stdin closing ends us
+    std::thread([main = GetCurrentThreadId()] {
+        for (std::string line; std::getline(std::cin, line);) PostThreadMessageW(main, WM_APP, 0, 0);
+        PostThreadMessageW(main, WM_QUIT, 0, 0);
+    }).detach();
+    SetTimer(nullptr, 0, poll * 1000, nullptr);
+    report();
+    MSG m;
+    while (GetMessageW(&m, nullptr, 0, 0)) { // also where the hook's callbacks get delivered
+        if (m.message == WM_TIMER || m.message == WM_APP) report();
+        DispatchMessageW(&m);
     }
 }
