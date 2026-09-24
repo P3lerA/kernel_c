@@ -1,9 +1,12 @@
 // One JSON line per poll: what a person sitting beside the user would see and hear.
-//   {"t": s since start, "idle_s": s since the last key or mouse input, "focus": {"app", "title", "text"},
+//   {"t": s since start, "time": local wall clock like "2026-09-23 Wed 15:04", "idle_s": s since the last key or mouse input,
+//    "focus": {"app", "title", "text"},
 //    "media": [{"app", "title", "artist"}], "mic": [app], "headphones": device name}
 // Past `idle_s`, a field is there only when it has something to say: nothing playing, no `media`; sound on speakers, no `headphones`.
 // usage: kernel [poll_seconds=10] [own_pid]
 // `focus` is the last foreground window that isn't own_pid's: clicking the companion must not make us read the companion.
+// Nor the shell's taskbar or desktop: they read as a bare "explorer", which passes for a folder window.
+// Before there is one (only the companion has been in front since we started), there is no `focus`.
 // Any line on stdin asks for a read right now, e.g. the moment the user starts talking to her.
 #include <windows.h>
 #include <initguid.h> // these three in this order: initguid has the next two define their property keys here, not just declare them,
@@ -101,18 +104,28 @@ std::wstring app_name(DWORD pid) { // C:\...\chrome.exe -> chrome
 }
 
 DWORD own = 0; // the companion's process: its windows are never what the user is doing
-HWND target = nullptr; // the last foreground window that isn't the companion's
+HWND target = nullptr; // the last foreground window that isn't the companion's or the shell's
+
+// The taskbar (on the main display, on the others) and the desktop, by window class. The companion lies on the taskbar:
+// a click beside her lands on it.
+bool shell(HWND w) {
+    wchar_t name[32]{};
+    GetClassNameW(w, name, 32);
+    std::wstring_view c = name;
+    return c == L"Shell_TrayWnd" || c == L"Shell_SecondaryTrayWnd" || c == L"Progman" || c == L"WorkerW";
+}
 
 // Called on every foreground change, which is all the hook listens to.
 void CALLBACK foreground(HWINEVENTHOOK, DWORD, HWND w, LONG, LONG, DWORD, DWORD) {
     DWORD pid = 0;
     GetWindowThreadProcessId(w, &pid);
-    if (pid != own) target = w;
+    if (pid != own && !shell(w)) target = w;
 }
 
 // ponytail: GetForegroundWindow says ApplicationFrameHost for UWP apps; take the pid from the UIA focused element instead
 std::string focus() {
-    HWND w = IsWindow(target) ? target : GetForegroundWindow(); // UIA reads a window in the background just as well
+    if (!IsWindow(target)) return ""; // none yet, or it closed
+    HWND w = target; // UIA reads a window in the background just as well
     wchar_t title[512]{};
     GetWindowTextW(w, title, 512);
     DWORD pid = 0;
@@ -213,11 +226,12 @@ int main(int argc, char** argv) {
     auto start = std::chrono::steady_clock::now();
     auto report = [&] {
         double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-        std::println(R"({{"t":{:.1f},"idle_s":{}{}{}{}{}}})", t, idle_s(), focus(), media(), mic(), headphones());
+        std::chrono::zoned_time time{std::chrono::current_zone(), std::chrono::floor<std::chrono::minutes>(std::chrono::system_clock::now())};
+        std::println(R"({{"t":{:.1f},"time":"{:%Y-%m-%d %a %H:%M}","idle_s":{}{}{}{}{}}})", t, time, idle_s(), focus(), media(), mic(), headphones());
         fflush(stdout); // println throws once the reader is gone, which ends us
     };
 
-    target = GetForegroundWindow();
+    foreground(nullptr, 0, GetForegroundWindow(), 0, 0, 0, 0); // whatever is in front now counts, unless it is the companion
     SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, foreground, 0, 0, WINEVENT_OUTOFCONTEXT);
     // stdin lines become thread messages, so reads, polls and the hook all run on this thread; stdin closing ends us
     std::thread([main = GetCurrentThreadId()] {
