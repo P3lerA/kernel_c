@@ -1,0 +1,18 @@
+# A tag pushed (v1, v2...) builds kernel.exe and attaches it to that tag's release: Aisling fetches it from there,
+# pinned to one tag, since she reads its lines' shape.
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: cmake -B build
+      - run: cmake --build build --config Release
+      - run: gh release create "${{ github.ref_name }}" build/Release/kernel.exe --title "${{ github.ref_name }}" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
